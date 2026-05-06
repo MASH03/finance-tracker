@@ -1,120 +1,156 @@
-const workerCode = `
-    self.onmessage = function(e) {
-        const { transactions, query } = e.data;
-        
-        let filtered = transactions;
-        if (query && query.trim() !== '') {
-            const lowerQuery = query.toLowerCase();
-            filtered = transactions.filter(t => 
-                t.description.toLowerCase().includes(lowerQuery) ||
-                t.amount.toString().includes(lowerQuery)
-            );
+// ─── Supabase DB Layer ────────────────────────────────────────────────────────
+class SupabaseClient {
+    async init() {
+        const { data: { session }, error } = await sb.auth.getSession();
+        if (!session) {
+            window.location.href = 'login.html';
+            throw new Error('Not authenticated');
         }
-        
-        filtered.sort((a, b) => b.id - a.id);
-        
-        self.postMessage({ filtered });
-    };
-`;
+        this.userId = session.user.id;
+    }
 
+    async add(record) {
+        const { data, error } = await sb
+            .from('transactions')
+            .insert([{
+                user_id: this.userId,
+                description: record.description,
+                amount: record.amount,
+                type: record.type,
+                date: record.date
+            }])
+            .select()
+            .single();
+        if (error) throw new Error(error.message);
+        return data;
+    }
+
+    async remove(id) {
+        const { error } = await sb
+            .from('transactions')
+            .delete()
+            .eq('id', id);
+        if (error) throw new Error(error.message);
+    }
+
+    async getAll(query = '') {
+        let q = sb
+            .from('transactions')
+            .select('*')
+            .order('id', { ascending: false });
+
+        if (query.trim() !== '') {
+            q = q.ilike('description', `%${query}%`);
+        }
+
+        const { data, error } = await q;
+        if (error) throw new Error(error.message);
+        return data;
+    }
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
 class FinanceTracker {
     constructor() {
-        this.STORAGE_KEY = 'finance_transactions';
-        this.transactions = JSON.parse(localStorage.getItem(this.STORAGE_KEY)) || [];
+        this.db = new SupabaseClient();
+        this.transactions = [];
 
-        this.form = document.getElementById('transactionForm');
-        this.descInput = document.getElementById('desc');
+        this.form        = document.getElementById('transactionForm');
+        this.descInput   = document.getElementById('desc');
         this.amountInput = document.getElementById('amount');
         this.searchInput = document.getElementById('searchInput');
-        this.listEl = document.getElementById('transactionList');
-
-        this.balEl = document.getElementById('totalBalance');
-        this.incEl = document.getElementById('totalIncome');
-        this.expEl = document.getElementById('totalExpenses');
-
-        const blob = new Blob([workerCode], { type: 'application/javascript' });
-        this.worker = new Worker(URL.createObjectURL(blob));
-
-        this.worker.onmessage = (e) => {
-            this.renderList(e.data.filtered);
-        };
+        this.listEl      = document.getElementById('transactionList');
+        this.balEl       = document.getElementById('totalBalance');
+        this.incEl       = document.getElementById('totalIncome');
+        this.expEl       = document.getElementById('totalExpenses');
 
         this.searchTimeout = null;
-
         this.init();
     }
 
-    init() {
-        this.form.addEventListener('submit', (e) => this.addTransaction(e));
+    async init() {
+        try {
+            this.listEl.innerHTML = '<tr><td colspan="5" class="text-center py-8 text-muted-foreground">Connecting to Supabase...</td></tr>';
+            await this.db.init();
+            await this.refreshData();
+        } catch (err) {
+            console.error('Failed to initialize', err);
+            if (err.message !== 'Not authenticated') {
+                this.listEl.innerHTML = '<tr><td colspan="5" class="text-center py-8 text-rose-500 font-medium">Failed to connect to database.</td></tr>';
+            }
+            return;
+        }
 
+        this.form.addEventListener('submit', (e) => this.addTransaction(e));
         this.searchInput.addEventListener('input', (e) => {
             clearTimeout(this.searchTimeout);
             this.searchTimeout = setTimeout(() => {
-                this.requestFiltered(e.target.value);
+                this.refreshData(e.target.value);
             }, 300);
         });
-
-        this.updateTotals();
-        this.requestFiltered('');
     }
 
-    requestFiltered(query) {
-        this.worker.postMessage({
-            transactions: this.transactions,
-            query: query
-        });
+    async refreshData(query = '') {
+        try {
+            this.transactions = await this.db.getAll(query);
+            this.updateTotals();
+            this.renderList();
+        } catch (err) {
+            console.error(err);
+            this.listEl.innerHTML = '<tr><td colspan="5" class="text-center py-8 text-rose-500 font-medium">Failed to load transactions.</td></tr>';
+        }
     }
 
-    save() {
-        localStorage.setItem(this.STORAGE_KEY, JSON.stringify(this.transactions));
-        this.updateTotals();
-        this.requestFiltered(this.searchInput.value);
-    }
-
-    addTransaction(e) {
+    async addTransaction(e) {
         e.preventDefault();
 
         const description = this.descInput.value.trim();
-        const amount = parseFloat(this.amountInput.value);
-        const type = document.querySelector('input[name="type"]:checked').value;
+        const amount      = parseFloat(this.amountInput.value);
+        const type        = document.querySelector('input[name="type"]:checked').value;
 
         if (!description || isNaN(amount) || amount <= 0) return;
 
-        const newTrans = {
-            id: Date.now(),
-            description,
-            amount,
-            type
+        const record = { 
+            description, 
+            amount, 
+            type, 
+            date: new Date().toISOString() 
         };
 
-        this.transactions.push(newTrans);
-        this.save();
+        try {
+            await this.db.add(record);
+            await this.refreshData(this.searchInput.value);
+        } catch (err) {
+            console.error('Failed to save transaction', err);
+            return;
+        }
 
         this.form.reset();
         document.querySelector('input[name="type"][value="income"]').checked = true;
     }
 
-    deleteTransaction(id) {
-        this.transactions = this.transactions.filter(t => t.id !== id);
-        this.save();
+    async deleteTransaction(id) {
+        try {
+            await this.db.remove(id);
+            await this.refreshData(this.searchInput.value);
+        } catch (err) {
+            console.error('Failed to delete transaction', err);
+        }
     }
 
     formatCurrency(amount) {
-        return new Intl.NumberFormat('en-PH', {
-            style: 'currency',
-            currency: 'PHP'
-        }).format(amount);
+        return new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(amount);
+    }
+
+    formatDate(iso) {
+        if (!iso) return '—';
+        return new Date(iso).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' });
     }
 
     updateTotals() {
         const totals = this.transactions.reduce((acc, t) => {
-            if (t.type === 'income') {
-                acc.income += t.amount;
-                acc.balance += t.amount;
-            } else {
-                acc.expense += t.amount;
-                acc.balance -= t.amount;
-            }
+            if (t.type === 'income') { acc.income += t.amount; acc.balance += t.amount; }
+            else                     { acc.expense += t.amount; acc.balance -= t.amount; }
             return acc;
         }, { income: 0, expense: 0, balance: 0 });
 
@@ -123,22 +159,22 @@ class FinanceTracker {
         this.expEl.textContent = this.formatCurrency(totals.expense);
     }
 
-    renderList(transactions) {
+    renderList() {
         this.listEl.innerHTML = '';
 
-        if (transactions.length === 0) {
-            this.listEl.innerHTML = '<tr><td colspan="4" class="text-center py-8 text-muted-foreground">No transactions found.</td></tr>';
+        if (this.transactions.length === 0) {
+            this.listEl.innerHTML = '<tr><td colspan="5" class="text-center py-8 text-muted-foreground">No transactions found.</td></tr>';
             return;
         }
 
-        transactions.forEach(t => {
+        this.transactions.forEach(t => {
             const tr = document.createElement('tr');
             tr.className = 'animate-fade-in group';
-
             const isIncome = t.type === 'income';
 
             tr.innerHTML = `
                 <td class="px-4 py-3 font-medium">${t.description}</td>
+                <td class="px-4 py-3 text-xs text-muted-foreground">${this.formatDate(t.date)}</td>
                 <td class="px-4 py-3">
                     <span class="inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ring-1 ring-inset ${isIncome ? 'text-emerald-700 bg-emerald-50 ring-emerald-600/20' : 'text-rose-700 bg-rose-50 ring-rose-600/20'}">
                         ${isIncome ? 'Income' : 'Expense'}
@@ -154,49 +190,39 @@ class FinanceTracker {
                 </td>
             `;
 
-            const delBtn = tr.querySelector('button');
-            delBtn.addEventListener('click', () => this.deleteTransaction(t.id));
-
+            tr.querySelector('button').addEventListener('click', () => this.deleteTransaction(t.id));
             this.listEl.appendChild(tr);
         });
     }
 }
 
+// ─── Boot ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     new FinanceTracker();
     initTheme();
 });
 
 function initTheme() {
-    const html = document.documentElement;
-    const btn = document.getElementById('themeToggle');
-    const iconSun = document.getElementById('iconSun');
+    const html     = document.documentElement;
+    const btn      = document.getElementById('themeToggle');
+    const iconSun  = document.getElementById('iconSun');
     const iconMoon = document.getElementById('iconMoon');
-    const label = document.getElementById('themeLabel');
+    const label    = document.getElementById('themeLabel');
 
-    const saved = localStorage.getItem('finance_theme');
+    const saved      = localStorage.getItem('finance_theme');
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    const isDark = saved ? saved === 'dark' : prefersDark;
-
-    applyTheme(isDark);
+    applyTheme(saved ? saved === 'dark' : prefersDark);
 
     btn.addEventListener('click', () => {
-        const currentlyDark = html.classList.contains('dark');
-        applyTheme(!currentlyDark);
-        localStorage.setItem('finance_theme', !currentlyDark ? 'dark' : 'light');
+        const dark = !html.classList.contains('dark');
+        applyTheme(dark);
+        localStorage.setItem('finance_theme', dark ? 'dark' : 'light');
     });
 
     function applyTheme(dark) {
-        if (dark) {
-            html.classList.add('dark');
-            iconSun.style.display = 'block';
-            iconMoon.style.display = 'none';
-            label.textContent = 'Light Mode';
-        } else {
-            html.classList.remove('dark');
-            iconSun.style.display = 'none';
-            iconMoon.style.display = 'block';
-            label.textContent = 'Dark Mode';
-        }
+        html.classList.toggle('dark', dark);
+        iconSun.style.display  = dark ? 'block' : 'none';
+        iconMoon.style.display = dark ? 'none'  : 'block';
+        label.textContent      = dark ? 'Light Mode' : 'Dark Mode';
     }
 }

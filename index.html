@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Finance Tracker</title>
-    <meta name="description" content="A client-side financial tracking application.">
+    <meta name="description" content="A client-side financial tracking application backed by IndexedDB.">
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -22,7 +22,8 @@
                 <h1 class="text-2xl font-bold tracking-tight">Dashboard</h1>
                 <p class="text-muted-foreground">Manage and track your income and expenses.</p>
             </div>
-            <button id="themeToggle" aria-label="Toggle dark mode">
+            <div class="flex-row items-center gap-2">
+                <button id="themeToggle" aria-label="Toggle dark mode">
 
                 <svg id="iconSun" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
                     fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
@@ -37,7 +38,12 @@
                     <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
                 </svg>
                 <span id="themeLabel">Dark Mode</span>
-            </button>
+                </button>
+                <button id="logoutBtn" class="btn btn-ghost" aria-label="Logout" style="font-size: 0.8125rem; font-weight: 500;">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.5rem;"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" x2="9" y1="12" y2="12"></line></svg>
+                    Logout
+                </button>
+            </div>
         </header>
 
         <section class="grid grid-cols-3 gap-4 mb-8 summary-grid">
@@ -118,6 +124,7 @@
                         <thead class="text-left bg-muted/50 border-b">
                             <tr>
                                 <th class="font-medium px-4 py-3 text-muted-foreground">Description</th>
+                                <th class="font-medium px-4 py-3 text-muted-foreground">Date</th>
                                 <th class="font-medium px-4 py-3 text-muted-foreground">Type</th>
                                 <th class="font-medium px-4 py-3 text-right text-muted-foreground">Amount</th>
                                 <th class="font-medium px-4 py-3 text-right text-muted-foreground w-[50px]"></th>
@@ -125,7 +132,7 @@
                         </thead>
                         <tbody id="transactionList" class="divide-y">
                             <tr class="animate-fade-in">
-                                <td colspan="4" class="text-center py-8 text-muted-foreground">Loading...</td>
+                                <td colspan="5" class="text-center py-8 text-muted-foreground">Loading...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -176,7 +183,15 @@
         </div>
     </main>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="supabase.js"></script>
     <script src="script.js"></script>
+    <script>
+        document.getElementById('logoutBtn').addEventListener('click', async () => {
+            await sb.auth.signOut();
+            window.location.href = 'login.html';
+        });
+    </script>
 </body>
 
 </html>
