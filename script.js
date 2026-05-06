@@ -1,3 +1,50 @@
+// ─── Security Helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Safely escapes a string to prevent XSS when inserted into the DOM.
+ * Used as a fallback; prefer textContent / createTextNode over innerHTML.
+ */
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.appendChild(document.createTextNode(String(str)));
+    return div.innerHTML;
+}
+
+/**
+ * Validates and sanitizes all transaction fields before they reach the DB.
+ * Returns { ok: false, error: string } on failure, or { ok: true, record } on success.
+ */
+function validateTransaction(description, amount, type) {
+    // ── Type whitelist ── Only these two values are allowed; anything else is rejected.
+    const ALLOWED_TYPES = ['income', 'expense'];
+    if (!ALLOWED_TYPES.includes(type)) {
+        return { ok: false, error: 'Invalid transaction type.' };
+    }
+
+    // ── Description ──
+    const cleanDesc = description.trim();
+    if (!cleanDesc) {
+        return { ok: false, error: 'Description is required.' };
+    }
+    if (cleanDesc.length > 150) {
+        return { ok: false, error: 'Description must be 150 characters or fewer.' };
+    }
+
+    // ── Amount ──
+    const cleanAmount = parseFloat(amount);
+    if (isNaN(cleanAmount) || cleanAmount <= 0) {
+        return { ok: false, error: 'Amount must be a positive number.' };
+    }
+    // Guard against absurdly large values (max ₱999,999,999.99)
+    if (cleanAmount > 999_999_999.99) {
+        return { ok: false, error: 'Amount exceeds the maximum allowed value.' };
+    }
+    // Enforce 2 decimal places precision
+    const preciseAmount = parseFloat(cleanAmount.toFixed(2));
+
+    return { ok: true, record: { description: cleanDesc, amount: preciseAmount, type } };
+}
+
 // ─── Supabase DB Layer ────────────────────────────────────────────────────────
 class SupabaseClient {
     async init() {
@@ -26,6 +73,10 @@ class SupabaseClient {
     }
 
     async remove(id) {
+        // Ensure id is a number/UUID string — reject anything that looks tampered.
+        if (!id || typeof id !== 'string' && typeof id !== 'number') {
+            throw new Error('Invalid transaction ID.');
+        }
         const { error } = await sb
             .from('transactions')
             .delete()
@@ -39,8 +90,12 @@ class SupabaseClient {
             .select('*')
             .order('id', { ascending: false });
 
+        // Supabase SDK uses parameterized queries — the search term is NEVER
+        // interpolated raw into SQL. ilike() passes it as a bind parameter.
         if (query.trim() !== '') {
-            q = q.ilike('description', `%${query}%`);
+            // Limit search query length to prevent abuse
+            const safeQuery = query.trim().slice(0, 100);
+            q = q.ilike('description', `%${safeQuery}%`);
         }
 
         const { data, error } = await q;
@@ -63,6 +118,7 @@ class FinanceTracker {
         this.balEl       = document.getElementById('totalBalance');
         this.incEl       = document.getElementById('totalIncome');
         this.expEl       = document.getElementById('totalExpenses');
+        this.formError   = document.getElementById('formError');
 
         this.searchTimeout = null;
         this.init();
@@ -101,20 +157,38 @@ class FinanceTracker {
         }
     }
 
+    showFormError(msg) {
+        if (this.formError) {
+            this.formError.textContent = msg;
+            this.formError.style.display = 'block';
+        }
+    }
+
+    clearFormError() {
+        if (this.formError) {
+            this.formError.textContent = '';
+            this.formError.style.display = 'none';
+        }
+    }
+
     async addTransaction(e) {
         e.preventDefault();
+        this.clearFormError();
 
-        const description = this.descInput.value.trim();
-        const amount      = parseFloat(this.amountInput.value);
-        const type        = document.querySelector('input[name="type"]:checked').value;
+        const rawDesc   = this.descInput.value;
+        const rawAmount = this.amountInput.value;
+        const rawType   = document.querySelector('input[name="type"]:checked')?.value ?? '';
 
-        if (!description || isNaN(amount) || amount <= 0) return;
+        // ── Validate all fields before touching the database ──
+        const result = validateTransaction(rawDesc, rawAmount, rawType);
+        if (!result.ok) {
+            this.showFormError(result.error);
+            return;
+        }
 
-        const record = { 
-            description, 
-            amount, 
-            type, 
-            date: new Date().toISOString() 
+        const record = {
+            ...result.record,
+            date: new Date().toISOString()
         };
 
         try {
@@ -122,6 +196,7 @@ class FinanceTracker {
             await this.refreshData(this.searchInput.value);
         } catch (err) {
             console.error('Failed to save transaction', err);
+            this.showFormError('Could not save transaction. Please try again.');
             return;
         }
 
@@ -160,37 +235,78 @@ class FinanceTracker {
     }
 
     renderList() {
-        this.listEl.innerHTML = '';
+        // Clear the list safely
+        this.listEl.replaceChildren();
 
         if (this.transactions.length === 0) {
-            this.listEl.innerHTML = '<tr><td colspan="5" class="text-center py-8 text-muted-foreground">No transactions found.</td></tr>';
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = 5;
+            td.className = 'text-center py-8 text-muted-foreground';
+            td.textContent = 'No transactions found.';
+            tr.appendChild(td);
+            this.listEl.appendChild(tr);
             return;
         }
 
         this.transactions.forEach(t => {
+            const isIncome = t.type === 'income';
             const tr = document.createElement('tr');
             tr.className = 'animate-fade-in group';
-            const isIncome = t.type === 'income';
 
-            tr.innerHTML = `
-                <td class="px-4 py-3 font-medium">${t.description}</td>
-                <td class="px-4 py-3 text-xs text-muted-foreground">${this.formatDate(t.date)}</td>
-                <td class="px-4 py-3">
-                    <span class="inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ring-1 ring-inset ${isIncome ? 'text-emerald-700 bg-emerald-50 ring-emerald-600/20' : 'text-rose-700 bg-rose-50 ring-rose-600/20'}">
-                        ${isIncome ? 'Income' : 'Expense'}
-                    </span>
-                </td>
-                <td class="px-4 py-3 text-right ${isIncome ? 'text-emerald-600' : 'text-rose-600'} font-medium">
-                    ${isIncome ? '+' : '-'}${this.formatCurrency(t.amount)}
-                </td>
-                <td class="px-4 py-3 text-right">
-                    <button class="btn btn-ghost btn-icon-sm btn-destructive opacity-0 group-hover:opacity-100 transition-opacity" data-id="${t.id}" aria-label="Delete">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
-                    </button>
-                </td>
-            `;
+            // ── Column 1: Description ──────────────────────────────────────────
+            // Uses textContent — NEVER innerHTML — so no XSS is possible.
+            const tdDesc = document.createElement('td');
+            tdDesc.className = 'px-4 py-3 font-medium';
+            tdDesc.textContent = t.description; // ✅ Safe: textContent, not innerHTML
 
-            tr.querySelector('button').addEventListener('click', () => this.deleteTransaction(t.id));
+            // ── Column 2: Date ────────────────────────────────────────────────
+            const tdDate = document.createElement('td');
+            tdDate.className = 'px-4 py-3 text-xs text-muted-foreground';
+            tdDate.textContent = this.formatDate(t.date); // ✅ Safe
+
+            // ── Column 3: Type Badge ──────────────────────────────────────────
+            const tdType = document.createElement('td');
+            tdType.className = 'px-4 py-3';
+            const badge = document.createElement('span');
+            badge.className = `inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ring-1 ring-inset ${
+                isIncome
+                    ? 'text-emerald-700 bg-emerald-50 ring-emerald-600/20'
+                    : 'text-rose-700 bg-rose-50 ring-rose-600/20'
+            }`;
+            // ✅ Safe: only hardcoded strings from our own whitelist check
+            badge.textContent = isIncome ? 'Income' : 'Expense';
+            tdType.appendChild(badge);
+
+            // ── Column 4: Amount ──────────────────────────────────────────────
+            const tdAmount = document.createElement('td');
+            tdAmount.className = `px-4 py-3 text-right ${isIncome ? 'text-emerald-600' : 'text-rose-600'} font-medium`;
+            // formatCurrency returns a locale-formatted number string — safe
+            tdAmount.textContent = `${isIncome ? '+' : '-'}${this.formatCurrency(t.amount)}`; // ✅ Safe
+
+            // ── Column 5: Delete Button ───────────────────────────────────────
+            const tdAction = document.createElement('td');
+            tdAction.className = 'px-4 py-3 text-right';
+
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-ghost btn-icon-sm btn-destructive opacity-0 group-hover:opacity-100 transition-opacity';
+            btn.setAttribute('aria-label', 'Delete transaction');
+            // ✅ Safe: data-id is set via setAttribute, not innerHTML
+            btn.dataset.id = t.id;
+
+            // SVG trash icon — hardcoded, not from user data
+            btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+                fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                aria-hidden="true">
+                <path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/>
+                <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+                <line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>
+            </svg>`;
+
+            btn.addEventListener('click', () => this.deleteTransaction(t.id));
+            tdAction.appendChild(btn);
+
+            tr.append(tdDesc, tdDate, tdType, tdAmount, tdAction);
             this.listEl.appendChild(tr);
         });
     }
@@ -209,7 +325,7 @@ function initTheme() {
     const iconMoon = document.getElementById('iconMoon');
     const label    = document.getElementById('themeLabel');
 
-    const saved      = localStorage.getItem('finance_theme');
+    const saved       = localStorage.getItem('finance_theme');
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     applyTheme(saved ? saved === 'dark' : prefersDark);
 
